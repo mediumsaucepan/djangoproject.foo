@@ -1,0 +1,895 @@
+from contextlib import redirect_stderr
+from datetime import date, timedelta
+from io import StringIO
+
+import time_machine
+from django.conf import settings
+from django.contrib import admin
+from django.contrib.auth.models import Permission, User
+from django.contrib.contenttypes.models import ContentType
+from django.core.files.base import ContentFile
+from django.test import TestCase
+from django.test.utils import override_settings
+from django.urls import reverse
+from django.utils import timezone, translation
+
+from djangoproject.tests import ReleaseMixin
+from members.models import (
+    BRONZE_MEMBERSHIP,
+    DIAMOND_MEMBERSHIP,
+    GOLD_MEMBERSHIP,
+    PLATINUM_MEMBERSHIP,
+    SILVER_MEMBERSHIP,
+    CorporateMember,
+)
+
+from .models import ContentFormat, Entry, Event, ImageUpload
+from .sitemaps import WeblogSitemap
+from .templatetags.weblog import render_latest_blog_entries
+
+
+class DateTimeMixin:
+    def setUp(self):
+        self.now = timezone.now()
+        self.yesterday = self.now - timedelta(days=1)
+        self.tomorrow = self.now + timedelta(days=1)
+
+
+class EntryTestCase(DateTimeMixin, TestCase):
+    def test_manager_active(self):
+        """
+        Make sure that the Entry manager's `active` method works
+        """
+        Entry.objects.create(
+            pub_date=self.now, is_active=False, headline="inactive", slug="a"
+        )
+        Entry.objects.create(
+            pub_date=self.now, is_active=True, headline="active", slug="b"
+        )
+
+        self.assertQuerySetEqual(
+            Entry.objects.published(),
+            ["active"],
+            transform=lambda entry: entry.headline,
+        )
+
+    def test_manager_published(self):
+        """
+        Make sure that the Entry manager's `published` method works
+        """
+        Entry.objects.create(
+            pub_date=self.yesterday, is_active=False, headline="past inactive", slug="a"
+        )
+        Entry.objects.create(
+            pub_date=self.yesterday, is_active=True, headline="past active", slug="b"
+        )
+        Entry.objects.create(
+            pub_date=self.tomorrow,
+            is_active=False,
+            headline="future inactive",
+            slug="c",
+        )
+        Entry.objects.create(
+            pub_date=self.tomorrow, is_active=True, headline="future active", slug="d"
+        )
+
+        self.assertQuerySetEqual(
+            Entry.objects.published(),
+            ["past active"],
+            transform=lambda entry: entry.headline,
+        )
+
+    def test_manager_priority_order(self):
+        common_kwargs = {"headline": "Test", "slug": "test"}
+        Entry.objects.create(pub_date=self.now, featured=False, **common_kwargs)
+        Entry.objects.create(pub_date=self.now, featured=True, **common_kwargs)
+        Entry.objects.create(pub_date=self.yesterday, featured=False, **common_kwargs)
+        Entry.objects.create(pub_date=self.yesterday, featured=True, **common_kwargs)
+        self.assertQuerySetEqual(
+            Entry.objects.priority_order(),
+            [
+                (self.now, True),
+                (self.yesterday, True),
+                (self.now, False),
+                (self.yesterday, False),
+            ],
+            transform=lambda entry: (entry.pub_date, entry.featured),
+        )
+
+    def test_docutils_safe(self):
+        """
+        Make sure docutils' file inclusion directives are disabled by default.
+        """
+        with redirect_stderr(StringIO()):
+            entry = Entry.objects.create(
+                pub_date=self.now,
+                is_active=True,
+                headline="active",
+                content_format="reST",
+                body=".. raw:: html\n    :file: somefile\n",
+                slug="a",
+            )
+        self.assertIn("<p>&quot;raw&quot; directive disabled.</p>", entry.body_html)
+        self.assertIn(".. raw:: html\n    :file: somefile", entry.body_html)
+
+    def test_content_format_html(self):
+        entry = Entry.objects.create(
+            pub_date=self.now,
+            slug="a",
+            body="<strong>test</strong>",
+            content_format=ContentFormat.HTML,
+        )
+        self.assertHTMLEqual(entry.body_html, "<strong>test</strong>")
+
+    def test_content_format_reST(self):
+        entry = Entry.objects.create(
+            pub_date=self.now,
+            slug="a",
+            body="**test**",
+            content_format=ContentFormat.REST,
+        )
+        self.assertHTMLEqual(entry.body_html, "<p><strong>test</strong></p>")
+
+    def test_content_format_markdown(self):
+        entry = Entry.objects.create(
+            pub_date=self.now,
+            slug="a",
+            body="**test**",
+            content_format=ContentFormat.MARKDOWN,
+        )
+        self.assertHTMLEqual(entry.body_html, "<p><strong>test</strong></p>")
+
+    def test_header_base_level_reST(self):
+        entry = Entry.objects.create(
+            pub_date=self.now,
+            slug="a",
+            body="test\n====",
+            content_format=ContentFormat.REST,
+        )
+        self.assertHTMLEqual(
+            entry.body_html, '<div class="section" id="s-test"><h2>test</h2></div>'
+        )
+
+    def test_header_base_level_markdown(self):
+        entry = Entry.objects.create(
+            pub_date=self.now,
+            slug="a",
+            body="# test",
+            content_format=ContentFormat.MARKDOWN,
+        )
+        self.assertHTMLEqual(entry.body_html, '<h1 id="s-test">test</h1>')
+
+    def test_image_lazy_loader_markdown(self):
+        entry = Entry.objects.create(
+            pub_date=self.now,
+            slug="a",
+            body="# this is it\n![dilbert_alt](/m/blog/images/2025/10/Dilbert.gif)",
+            content_format=ContentFormat.MARKDOWN,
+        )
+        self.assertHTMLEqual(
+            entry.body_html,
+            '<h1 id="s-this-is-it">this is it</h1>'
+            '<p><img alt="dilbert_alt" loading="lazy"'
+            ' src="/m/blog/images/2025/10/Dilbert.gif"></p>',
+        )
+
+    def test_image_lazy_loader_reST(self):
+        entry = Entry.objects.create(
+            pub_date=self.now,
+            slug="a",
+            body=".. image:: /m/blog/images/2025/10/Dilbert.gif\n   :alt: dilbert_alt",
+            content_format=ContentFormat.REST,
+        )
+        self.assertHTMLEqual(
+            entry.body_html,
+            '<img alt="dilbert_alt" loading="lazy"'
+            ' src="/m/blog/images/2025/10/Dilbert.gif">',
+        )
+
+    def test_pub_date_localized(self):
+        entry = Entry(pub_date=date(2005, 7, 21))
+        self.assertEqual(entry.pub_date_localized, "July 21, 2005")
+        with translation.override("nn"):
+            self.assertEqual(entry.pub_date_localized, "21. juli 2005")
+
+    def test_markdown_table_conversion(self):
+        body = (
+            "| Framework | Language |\n"
+            "|-----------|----------|\n"
+            "| Django    | Python   |\n"
+            "| Flask     | Python   |"
+        )
+
+        entry = Entry.objects.create(
+            pub_date=self.now,
+            slug="markdown-table",
+            body=body,
+            content_format=ContentFormat.MARKDOWN,
+        )
+        expected_html = (
+            "<table>\n"
+            "<thead>\n<tr>\n<th>Framework</th>\n<th>Language</th>\n</tr>\n</thead>\n"
+            "<tbody>\n<tr>\n<td>Django</td>\n<td>Python</td>\n</tr>\n"
+            "<tr>\n<td>Flask</td>\n<td>Python</td>\n</tr>\n</tbody>\n</table>"
+        )
+        self.assertInHTML(expected_html, entry.body_html)
+
+    def test_markdown_code_block(self):
+        body = (
+            "```text\n"
+            "* @django/coc-committee\n"
+            "CODE_OF_CONDUCT.md @django/coc-committee @django/dsf-board\n"
+            "```"
+        )
+        entry = Entry.objects.create(
+            pub_date=self.now,
+            slug="markdown-code-block",
+            body=body,
+            content_format=ContentFormat.MARKDOWN,
+        )
+        expected_html = (
+            '<pre><code class="language-text">* @django/coc-committee\n'
+            "CODE_OF_CONDUCT.md @django/coc-committee @django/dsf-board\n"
+            "</code></pre>"
+        )
+        self.assertInHTML(expected_html, entry.body_html)
+
+
+class EventTestCase(DateTimeMixin, TestCase):
+    def test_manager_past_future(self):
+        """
+        Make sure that the Event manager's `past` and `future` methods works
+        """
+        Event.objects.create(date=self.yesterday, pub_date=self.now, headline="past")
+        Event.objects.create(date=self.tomorrow, pub_date=self.now, headline="future")
+
+        self.assertQuerySetEqual(
+            Event.objects.future(), ["future"], transform=lambda event: event.headline
+        )
+        self.assertQuerySetEqual(
+            Event.objects.past(), ["past"], transform=lambda event: event.headline
+        )
+
+    def test_manager_past_future_include_today(self):
+        """
+        Make sure that both .future() and .past() include today's events.
+        """
+        Event.objects.create(date=self.now, pub_date=self.now, headline="today")
+
+        self.assertQuerySetEqual(
+            Event.objects.future(), ["today"], transform=lambda event: event.headline
+        )
+        self.assertQuerySetEqual(
+            Event.objects.past(), ["today"], transform=lambda event: event.headline
+        )
+
+    def test_past_future_ordering(self):
+        """
+        Make sure the that .future() and .past() use the actual date for ordering
+        (and not the pub_date).
+        """
+        D = timedelta(days=1)
+        Event.objects.create(
+            date=self.yesterday - D, pub_date=self.yesterday - D, headline="a"
+        )
+        Event.objects.create(date=self.yesterday, pub_date=self.yesterday, headline="b")
+
+        Event.objects.create(date=self.tomorrow, pub_date=self.tomorrow, headline="c")
+        Event.objects.create(
+            date=self.tomorrow + D, pub_date=self.tomorrow + D, headline="d"
+        )
+
+        self.assertQuerySetEqual(
+            Event.objects.future(), ["c", "d"], transform=lambda event: event.headline
+        )
+        self.assertQuerySetEqual(
+            Event.objects.past(), ["b", "a"], transform=lambda event: event.headline
+        )
+
+
+class ViewsTestCase(ReleaseMixin, DateTimeMixin, TestCase):
+    def test_detail_view_html_meta(self):
+        headline = "Pride and Prejudice - Review"
+        author = "Jane Austen"
+        pub_date = date(2005, 7, 21)
+        blog_entry = Entry.objects.create(
+            pub_date=pub_date,
+            is_active=True,
+            headline=headline,
+            slug="a",
+            author=author,
+        )
+        blog_description = "Posted by Jane Austen on July 21, 2005"
+        self.assertEqual(blog_entry.description, blog_description)
+
+        blog_url = blog_entry.get_absolute_url()
+        response = self.client.get(blog_url)
+        self.assertEqual(response.status_code, 200)
+
+        expected_html_meta_tags = [
+            f'<meta name="description" content="{blog_description}" />',
+            '<meta property="og:type" content="article" />',
+            f'<meta property="og:title" content="{headline}" />',
+            f'<meta property="og:description" content="{blog_description}" />',
+            '<meta property="og:article:published_time" content="2005-07-21T00:00:00" />',
+            f'<meta property="og:article:author" content="{author}" />',
+            '<meta property="og:image:alt" content="Django logo" />',
+            f'<meta property="og:url" content="{blog_url}" />',
+            '<meta property="og:site_name" content="Django Project" />',
+            '<meta property="twitter:card" content="summary" />',
+            '<meta property="twitter:creator" content="djangoproject" />',
+            '<meta property="twitter:site" content="djangoproject" />',
+        ]
+        for expected_html_meta_tag in expected_html_meta_tags:
+            self.assertContains(response, expected_html_meta_tag, html=True)
+
+    def test_staff_with_change_permission_can_see_unpublished_detail_view(self):
+        """
+        Staff users with change permission on BlogEntry can't see unpublished entries
+        in the list, but can view the detail page
+        """
+        e1 = Entry.objects.create(
+            pub_date=self.yesterday, is_active=False, headline="inactive", slug="a"
+        )
+        user = User.objects.create(username="staff", is_staff=True)
+        # Add blog entry change permission
+
+        content_type = ContentType.objects.get_for_model(Entry)
+        change_permission = Permission.objects.get(
+            content_type=content_type, codename="change_entry"
+        )
+        user.user_permissions.add(change_permission)
+        self.client.force_login(user)
+        self.assertEqual(Entry.objects.all().count(), 1)
+        response = self.client.get(reverse("weblog:index"))
+        self.assertEqual(response.status_code, 404)
+
+        response = self.client.get(
+            reverse(
+                "weblog:entry",
+                kwargs={
+                    "year": e1.pub_date.year,
+                    "month": e1.pub_date.strftime("%b").lower(),
+                    "day": e1.pub_date.day,
+                    "slug": e1.slug,
+                },
+            )
+        )
+        request = response.context["request"]
+        self.assertTrue(request.user.is_staff)
+        self.assertTrue(request.user.has_perm("blog.change_entry"))
+        self.assertEqual(response.status_code, 200)
+
+    def test_staff_without_change_permission_cannot_see_unpublished_detail_view(self):
+        """
+        Staff users without change permission on BlogEntry can't see unpublished entries
+        """
+        e1 = Entry.objects.create(
+            pub_date=self.yesterday, is_active=False, headline="inactive", slug="a"
+        )
+        user = User.objects.create(username="staff-no-perm", is_staff=True)
+        # No permissions added
+        self.client.force_login(user)
+        self.assertEqual(Entry.objects.all().count(), 1)
+
+        # Test detail view for unpublished entry - should return 404
+        response = self.client.get(
+            reverse(
+                "weblog:entry",
+                kwargs={
+                    "year": e1.pub_date.year,
+                    "month": e1.pub_date.strftime("%b").lower(),
+                    "day": e1.pub_date.day,
+                    "slug": e1.slug,
+                },
+            )
+        )
+        request = response.context["request"]
+        self.assertTrue(request.user.is_staff)
+        self.assertFalse(request.user.has_perm("blog.change_entry"))
+        self.assertEqual(response.status_code, 404)
+
+    def test_no_past_upcoming_events(self):
+        """
+        Make sure there are no past event in the "upcoming events" sidebar (#399)
+        """
+        # We need a published entry on the index page so that it doesn't return a 404
+        Entry.objects.create(pub_date=self.yesterday, is_active=True, slug="a")
+        Event.objects.create(
+            date=self.yesterday, pub_date=self.now, is_active=True, headline="Jezdezcon"
+        )
+        response = self.client.get(reverse("weblog:index"))
+        self.assertEqual(response.status_code, 200)
+        self.assertQuerySetEqual(response.context["events"], [])
+
+    def test_no_unpublished_future_events(self):
+        """
+        Make sure there are no unpublished future events in the "upcoming events" sidebar
+        """
+        # We need a published entry on the index page so that it doesn't return a 404
+        Entry.objects.create(pub_date=self.yesterday, is_active=True, slug="a")
+        Event.objects.create(
+            date=self.tomorrow,
+            pub_date=self.yesterday,
+            is_active=False,
+            headline="inactive",
+        )
+        Event.objects.create(
+            date=self.tomorrow,
+            pub_date=self.tomorrow,
+            is_active=True,
+            headline="future publish date",
+        )
+
+        for user in [
+            None,
+            User.objects.create(username="non-staff", is_staff=False),
+            User.objects.create(username="staff", is_staff=True),
+            User.objects.create_superuser(username="superuser"),
+        ]:
+            if user:
+                self.client.force_login(user)
+            response = self.client.get(reverse("weblog:index"))
+            with self.subTest(user=user):
+                self.assertEqual(response.status_code, 200)
+                self.assertQuerySetEqual(response.context["events"], [])
+
+    def test_corporate_sponsors_displayed(self):
+        objs = CorporateMember.objects.bulk_create(
+            [
+                CorporateMember(
+                    display_name="Platinum company",
+                    membership_level=PLATINUM_MEMBERSHIP,
+                ),
+                CorporateMember(
+                    display_name="Diamond company", membership_level=DIAMOND_MEMBERSHIP
+                ),
+                CorporateMember(
+                    display_name="Gold company", membership_level=GOLD_MEMBERSHIP
+                ),
+                CorporateMember(
+                    display_name="Silver company", membership_level=SILVER_MEMBERSHIP
+                ),
+                CorporateMember(
+                    display_name="Bronze company", membership_level=BRONZE_MEMBERSHIP
+                ),
+            ]
+        )
+        for obj in objs:
+            obj.invoice_set.create(amount=4, expiration_date=date(3000, 1, 1))
+
+        blog_entry = Entry.objects.create(
+            pub_date=date(2005, 7, 21),
+            is_active=True,
+            headline="Django election results",
+            slug="a",
+            author="DSF Board",
+        )
+        urls = [
+            reverse("weblog:index"),
+            reverse(
+                "weblog:entry",
+                kwargs={
+                    "year": blog_entry.pub_date.year,
+                    "month": blog_entry.pub_date.strftime("%b").lower(),
+                    "day": blog_entry.pub_date.day,
+                    "slug": blog_entry.slug,
+                },
+            ),
+            reverse(
+                "weblog:archive-year",
+                kwargs={"year": blog_entry.pub_date.year},
+            ),
+            reverse(
+                "weblog:archive-month",
+                kwargs={
+                    "year": blog_entry.pub_date.year,
+                    "month": blog_entry.pub_date.strftime("%b").lower(),
+                },
+            ),
+            reverse(
+                "weblog:archive-day",
+                kwargs={
+                    "year": blog_entry.pub_date.year,
+                    "month": blog_entry.pub_date.strftime("%b").lower(),
+                    "day": blog_entry.pub_date.day,
+                },
+            ),
+        ]
+        for url in urls:
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertContains(response, "Diamond and Platinum Members")
+                self.assertContains(response, "Platinum company")
+                self.assertContains(response, "Diamond company")
+                self.assertNotContains(response, "Gold company")
+                self.assertNotContains(response, "Silver company")
+                self.assertNotContains(response, "Bronze company")
+
+    def test_featured_entries_are_listed_first(self):
+        newer_entry = Entry.objects.create(
+            pub_date=self.yesterday,
+            is_active=True,
+            headline="newer entry",
+            slug="newer-entry",
+            featured=False,
+        )
+        featured_entry = Entry.objects.create(
+            pub_date=self.yesterday - timedelta(days=1),
+            is_active=True,
+            headline="important entry",
+            slug="important-entry",
+            featured=True,
+        )
+
+        response = self.client.get(reverse("weblog:index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertQuerySetEqual(
+            response.context["object_list"],
+            [featured_entry, newer_entry],
+        )
+        self.assertContains(response, "Featured", count=1)
+
+    def test_anonymous_user_cannot_see_unpublished_entries(self):
+        """
+        Anonymous users can't see unpublished entries at all (list or detail view)
+        """
+        # Create a published entry to ensure the list view works
+        published_entry = Entry.objects.create(
+            pub_date=self.yesterday,
+            is_active=True,
+            headline="published",
+            slug="published",
+        )
+
+        # Create an unpublished entry
+        unpublished_entry = Entry.objects.create(
+            pub_date=self.tomorrow,
+            is_active=True,
+            headline="unpublished",
+            slug="unpublished",
+        )
+
+        # Test list view - should return 200 but not include the unpublished entry
+        response = self.client.get(reverse("weblog:index"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "published")
+        self.assertNotContains(response, "unpublished")
+
+        # Test detail view for unpublished entry - should return 404
+        unpublished_url = reverse(
+            "weblog:entry",
+            kwargs={
+                "year": unpublished_entry.pub_date.year,
+                "month": unpublished_entry.pub_date.strftime("%b").lower(),
+                "day": unpublished_entry.pub_date.day,
+                "slug": unpublished_entry.slug,
+            },
+        )
+        response = self.client.get(unpublished_url)
+        self.assertEqual(response.status_code, 404)
+
+        # Test detail view for published entry - should return 200
+        published_url = reverse(
+            "weblog:entry",
+            kwargs={
+                "year": published_entry.pub_date.year,
+                "month": published_entry.pub_date.strftime("%b").lower(),
+                "day": published_entry.pub_date.day,
+                "slug": published_entry.slug,
+            },
+        )
+        response = self.client.get(published_url)
+        self.assertEqual(response.status_code, 200)
+
+    def test_user_cannot_see_unpublished_entries(self):
+        """
+        Non-staff users can't see unpublished entries at all (list or detail view)
+        """
+        user = User.objects.create(username="non-staff", is_staff=False)
+        self.client.force_login(user)
+
+        # Create a published entry to ensure the list view works
+        published_entry = Entry.objects.create(
+            pub_date=self.yesterday,
+            is_active=True,
+            headline="published",
+            slug="published",
+        )
+
+        # Create an unpublished entry
+        unpublished_entry = Entry.objects.create(
+            pub_date=self.tomorrow,
+            is_active=True,
+            headline="unpublished",
+            slug="unpublished",
+        )
+
+        # Test list view - should return 200 but not include the unpublished entry
+        response = self.client.get(reverse("weblog:index"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "published")
+        self.assertNotContains(response, "unpublished")
+
+        # Test detail view for unpublished entry - should return 404
+        unpublished_url = reverse(
+            "weblog:entry",
+            kwargs={
+                "year": unpublished_entry.pub_date.year,
+                "month": unpublished_entry.pub_date.strftime("%b").lower(),
+                "day": unpublished_entry.pub_date.day,
+                "slug": unpublished_entry.slug,
+            },
+        )
+        response = self.client.get(unpublished_url)
+        self.assertEqual(response.status_code, 404)
+
+        # Test detail view for published entry - should return 200
+        published_url = reverse(
+            "weblog:entry",
+            kwargs={
+                "year": published_entry.pub_date.year,
+                "month": published_entry.pub_date.strftime("%b").lower(),
+                "day": published_entry.pub_date.day,
+                "slug": published_entry.slug,
+            },
+        )
+        response = self.client.get(published_url)
+        self.assertEqual(response.status_code, 200)
+
+    def test_archive_view_titles(self):
+        headline = "Pride and Prejudice - Review"
+        pub_date = date(2005, 7, 21)
+        Entry.objects.create(
+            pub_date=pub_date,
+            is_active=True,
+            headline=headline,
+            slug="a",
+            author="Jane Austen",
+        )
+        year = pub_date.strftime("%Y")
+        month = pub_date.strftime("%b").lower()
+        day = pub_date.strftime("%d")
+        for testcase in [
+            {
+                "view": "weblog:archive-year",
+                "kwargs": {"year": year},
+                "header": "<h1>2005 archive</h1>",
+            },
+            {
+                "view": "weblog:archive-month",
+                "kwargs": {"year": year, "month": month},
+                "header": "<h1>July 2005 archive</h1>",
+            },
+            {
+                "view": "weblog:archive-day",
+                "kwargs": {"year": year, "month": month, "day": day},
+                "header": "<h1>July 21, 2005 archive</h1>",
+            },
+        ]:
+            with self.subTest(view=testcase["view"]):
+                response = self.client.get(
+                    reverse(testcase["view"], kwargs=testcase["kwargs"])
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, testcase["header"])
+                self.assertContains(response, headline)
+
+
+@override_settings(
+    # Caching middleware is added in the production settings file;
+    # simulate that here for the tests.
+    MIDDLEWARE=(
+        ["django.middleware.cache.UpdateCacheMiddleware"]
+        + settings.MIDDLEWARE
+        + ["django.middleware.cache.FetchFromCacheMiddleware"]
+    ),
+)
+class ViewsCachingTestCase(ReleaseMixin, DateTimeMixin, TestCase):
+    def test_drafts_have_no_cache_headers(self):
+        """
+        Draft (unpublished) entries have no-cache headers.
+        """
+        user = User.objects.create(username="staff", is_staff=True)
+        content_type = ContentType.objects.get_for_model(Entry)
+        change_permission = Permission.objects.get(
+            content_type=content_type, codename="change_entry"
+        )
+        user.user_permissions.add(change_permission)
+        self.client.force_login(user)
+
+        unpublished_entry = Entry.objects.create(
+            pub_date=self.tomorrow,
+            is_active=True,
+            headline="unpublished",
+            slug="unpublished",
+        )
+        unpublished_url = reverse(
+            "weblog:entry",
+            kwargs={
+                "year": unpublished_entry.pub_date.year,
+                "month": unpublished_entry.pub_date.strftime("%b").lower(),
+                "day": unpublished_entry.pub_date.day,
+                "slug": unpublished_entry.slug,
+            },
+        )
+
+        response = self.client.get(unpublished_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Cache-Control", response.headers)
+        self.assertEqual(
+            response.headers["Cache-Control"],
+            "max-age=0, no-cache, no-store, must-revalidate, private",
+        )
+
+    def test_published_blogs_have_cache_control_headers(self):
+        """
+        Published blog posts has Cache-Control header.
+        """
+        entry = Entry.objects.create(
+            pub_date=self.yesterday,
+            is_active=True,
+            headline="published",
+            slug="published",
+        )
+        url = reverse(
+            "weblog:entry",
+            kwargs={
+                "year": entry.pub_date.year,
+                "month": entry.pub_date.strftime("%b").lower(),
+                "day": entry.pub_date.day,
+                "slug": entry.slug,
+            },
+        )
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Cache-Control"], "max-age=300")
+
+
+class SitemapTests(DateTimeMixin, TestCase):
+    def test_sitemap(self):
+        entry = Entry.objects.create(
+            pub_date=self.yesterday, is_active=True, headline="foo", slug="foo"
+        )
+        sitemap = WeblogSitemap()
+        urls = sitemap.get_urls()
+        self.assertEqual(len(urls), 1)
+        url_info = urls[0]
+        self.assertEqual(url_info["location"], entry.get_absolute_url())
+
+
+class ImageUploadTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_superuser("test")
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_login(self.user)
+
+    def test_uploaded_by(self):
+        # Can't test the ModelForm directly because the logic in
+        # ModelAdmin.save_model()
+        data = {
+            "title": "test",
+            "alt_text": "test",
+            "image": ContentFile(b".", name="test.png"),
+        }
+        response = self.client.post(
+            reverse("admin:blog_imageupload_add"),
+            data=data,
+        )
+        self.assertEqual(response.status_code, 302)
+        upload = ImageUpload.objects.get()
+        self.assertEqual(upload.uploaded_by, self.user)
+
+    def test_contentformat_image_tags(self):
+        for cf, expected in [
+            (ContentFormat.REST, ".. image:: /test/image.png\n   :alt: TEST"),
+            (ContentFormat.HTML, '<img src="/test/image.png" alt="TEST">'),
+            (ContentFormat.MARKDOWN, "![TEST](/test/image.png)"),
+        ]:
+            with self.subTest(contentformat=cf):
+                self.assertEqual(
+                    cf.img(url="/test/image.png", alt_text="TEST"),
+                    expected,
+                )
+
+    @time_machine.travel("2005-07-21")
+    def test_full_url(self):
+        i = ImageUpload.objects.create(
+            title="test",
+            alt_text="test",
+            image=ContentFile(b".", name="test.png"),
+        )
+        # Because the storage is persistent between test runs, running this
+        # test twice will trigger a filename clash and the storage will append
+        # a random suffix to the filename, hence the use of assertRegex here.
+        self.assertRegex(
+            i.full_url,
+            r"http://www\.djangoproject\.localhost:8000"
+            r"/m/blog/images/2005/07/test(_\w+)?\.png",
+        )
+
+    def test_alt_text_html_escape(self):
+        common_img_tag = '<img src="." loading="lazy" '
+        testdata = [
+            (ContentFormat.HTML, 'te"st', '<img src="." alt="te&quot;st">'),
+            (ContentFormat.HTML, "te<st>", '<img src="." alt="te&lt;st&gt;">'),
+            (ContentFormat.MARKDOWN, 'te"st', common_img_tag + 'alt="te&quot;st">'),
+            (ContentFormat.MARKDOWN, "te[st]", common_img_tag + 'alt="te[st]">'),
+            (ContentFormat.MARKDOWN, "te{st}", common_img_tag + 'alt="te{st}">'),
+            (ContentFormat.MARKDOWN, "te<st>", common_img_tag + 'alt="te&lt;st&gt;">'),
+            (ContentFormat.MARKDOWN, "test*", common_img_tag + 'alt="test*">'),
+            (ContentFormat.MARKDOWN, "test_", common_img_tag + 'alt="test_">'),
+            (ContentFormat.MARKDOWN, "test`", common_img_tag + 'alt="test`">'),
+            (ContentFormat.MARKDOWN, "test+", common_img_tag + 'alt="test+">'),
+            (ContentFormat.MARKDOWN, "test-", common_img_tag + 'alt="test-">'),
+            (ContentFormat.MARKDOWN, "test.", common_img_tag + 'alt="test.">'),
+            (ContentFormat.MARKDOWN, "test!", common_img_tag + 'alt="test!">'),
+            (ContentFormat.MARKDOWN, "te\nst", common_img_tag + 'alt="te\nst">'),
+            (ContentFormat.REST, 'te"st', common_img_tag + 'alt="te&quot;st">'),
+            (ContentFormat.REST, "te[st]", common_img_tag + 'alt="te[st]">'),
+            (ContentFormat.REST, "te{st}", common_img_tag + 'alt="te{st}">'),
+            (ContentFormat.REST, "te<st>", common_img_tag + 'alt="te&lt;st&gt;">'),
+            (ContentFormat.REST, "te:st", common_img_tag + 'alt="te:st">'),
+            (ContentFormat.REST, "test*", common_img_tag + 'alt="test*">'),
+            (ContentFormat.REST, "test_", common_img_tag + 'alt="test_">'),
+            (ContentFormat.REST, "test`", common_img_tag + 'alt="test`">'),
+            (ContentFormat.REST, "test+", common_img_tag + 'alt="test+">'),
+            (ContentFormat.REST, "test-", common_img_tag + 'alt="test-">'),
+            (ContentFormat.REST, "test.", common_img_tag + 'alt="test.">'),
+            (ContentFormat.REST, "test!", common_img_tag + 'alt="test!">'),
+        ]
+        for cf, alt_text, expected in testdata:
+            # RST doesn't like an empty src, so we use . instead
+            img_tag = cf.img(url=".", alt_text=alt_text)
+            if cf is ContentFormat.MARKDOWN:
+                expected = f"<p>{expected}</p>"
+            with self.subTest(cf=cf, alt_text=alt_text):
+                self.assertHTMLEqual(
+                    ContentFormat.to_html(cf, img_tag),
+                    expected,
+                )
+
+    def test_copy_button(self):
+        i = ImageUpload.objects.create(
+            title="test",
+            alt_text='Alt text "here"',
+            image=ContentFile(b".", name="test.png"),
+        )
+        self.assertInHTML(
+            '<button type="button" data-clipboard-content='
+            f'"&lt;img src=&quot;/m/{i.image}&quot; '
+            'alt=&quot;Alt text &amp;quot;here&amp;quot;&quot;&gt;">'
+            "Raw HTML"
+            "</button>",
+            admin.site.get_model_admin(ImageUpload).copy_buttons(i),
+        )
+
+
+class TemplateTagTests(DateTimeMixin, TestCase):
+    def test_render_latest_blog_entries_prioritizes_featured_entries(self):
+        newer_entry = Entry.objects.create(
+            pub_date=self.yesterday,
+            is_active=True,
+            headline="newer entry",
+            slug="newer-entry",
+            featured=False,
+        )
+        featured_entry = Entry.objects.create(
+            pub_date=self.yesterday - timedelta(days=1),
+            is_active=True,
+            headline="important entry",
+            slug="important-entry",
+            featured=True,
+        )
+
+        context = render_latest_blog_entries(2)
+
+        self.assertQuerySetEqual(
+            context["entries"],
+            [featured_entry, newer_entry],
+        )

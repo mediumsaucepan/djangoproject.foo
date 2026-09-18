@@ -1,0 +1,51 @@
+{% extends "base_foundation.html" %}
+{% load i18n %}
+
+{% block title %}{% translate "Contact the Django Software Foundation" %}{% endblock %}
+
+{% block content %}
+  <h1>{% translate "Contact the Django Software Foundation" %}</h1>
+  <p>
+    {% blocktranslate trimmed %}
+      This contact form is for the Django Software Foundation - the legal and
+      fundraising arm of the Django project.
+    {% endblocktranslate %}
+  </p>
+  <p>
+    {% blocktranslate trimmed %}
+      If you want to report a bug, feature request, or documentation issue in Django,
+      use the <a href="https://code.djangoproject.com">ticket tracker</a>.
+    {% endblocktranslate %}
+  </p>
+  <p>
+    {% blocktranslate trimmed %}
+      If you want to report a problem with this website, use the
+      <a href="https://github.com/django/djangoproject.com">GitHub repo</a>.
+    {% endblocktranslate %}
+  </p>
+  <p>
+    {% blocktranslate trimmed %}
+      If you've got questions about how to use Django, use the
+      <a href="https://forum.djangoproject.com">Django Forum</a>.
+    {% endblocktranslate %}
+  </p>
+  <form action="." method="post" accept-charset="utf-8">
+    {% csrf_token %}
+    <div>
+      {{ form.name.as_field_group }}
+    </div>
+    <div>
+      {{ form.email.as_field_group }}
+    </div>
+    <div>
+      {{ form.message_subject.as_field_group }}
+    </div>
+    <div>
+      {{ form.body.as_field_group }}
+    </div>
+    {{ form.captcha }}
+    <div class="submit">
+      <button type="submit" class="cta arrow">{% translate "Send" %}</button>
+    </div>
+  </form>
+{% endblock content %}

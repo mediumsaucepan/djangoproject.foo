@@ -1,0 +1,14 @@
+{% extends "base_foundation.html" %}
+{% load fundraising_extras %}
+{% block og_title %}{{ flatpage.title }}{% endblock %}
+
+{% block title %}{{ flatpage.title }}{% endblock %}
+
+{% block content %}
+    <h1>{{ flatpage.title }}</h1>
+    {{ flatpage.content }}
+{% endblock content %}
+
+{% block content-related-extra %}
+    {% top_corporate_members "sponsored_fellow" "diamond" "platinum" "gold" header="Sponsored Fellow, Diamond, Platinum and Gold Members" %}
+{% endblock content-related-extra %}

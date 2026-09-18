@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{% block columnwrap %}
+  <div id="subwrap">
+    <div id="content-main">
+      {% block content %}{% endblock %}
+    </div>
+    <!-- END #content-main -->
+    <aside id="content-related" class="sidebar" aria-labelledby="aside-header">
+      {% block content-related %}{% endblock %}
+    </aside>
+    <!-- END #content-related -->
+  </div>
+  <!-- END #subwrap -->
+  <div id="content-extra" class="sidebar">
+    {% block content-extra %}{% endblock %}
+  </div>
+  <!-- END #content-extra -->
+{% endblock columnwrap %}

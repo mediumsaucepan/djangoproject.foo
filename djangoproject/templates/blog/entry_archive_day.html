@@ -1,0 +1,22 @@
+{% extends "base_weblog.html" %}
+{% load i18n %}
+
+{% block title %}{{ day|date:"DATE_FORMAT" }} | {% translate "Weblog" %}{% endblock %}
+
+{% block og_title %}{% blocktranslate with day=day|date:"DATE_FORMAT" %}Django news: {{ day }} archive{% endblocktranslate %}{% endblock %}
+
+{% block content %}
+
+  <h1>{% blocktranslate with day=day|date:"DATE_FORMAT" %}{{ day }} archive{% endblocktranslate %}</h1>
+
+  <ul class="list-news">
+
+    {% for object in object_list %}
+      {% include 'blog/news_summary.html' with object=object %}
+    {% endfor %}
+
+  </ul>
+
+  {% include 'blog/blog_pagination.html' %}
+
+{% endblock content %}

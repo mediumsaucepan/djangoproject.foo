@@ -1,0 +1,23 @@
+{% extends "base_weblog.html" %}
+{% load i18n %}
+
+{% block title %}{{ object.headline|escape }} | Weblog{% endblock %}
+
+{% block description %}{{ object.description }}{% endblock %}
+
+{% block og_tags %}
+    {% for property, content in object.opengraph_tags.items %}
+        <meta property="{{ property }}" content="{{ content }}" />
+    {% endfor %}
+{% endblock og_tags %}
+
+{% block content %}
+    <h1>{{ object.headline|safe }}</h1>
+
+    <span class="meta">
+        {% blocktranslate trimmed with author=object.author pub_date=object.pub_date|date:"DATE_FORMAT" %}
+            Posted by <strong>{{ author }}</strong> on {{ pub_date }}
+        {% endblocktranslate %}
+    </span>
+    <div class="blog-entry-body">{{ object.body_html|safe }}</div>
+{% endblock content %}

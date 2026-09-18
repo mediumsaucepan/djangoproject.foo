@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% load fundraising_extras hosts i18n weblog %}
+{% block layout_class %}sidebar-right{% endblock %}
+
+{% block title %}{% translate "News &amp; Events" %}{% endblock %}
+
+{% block og_title %}{% translate "News &amp; Events" %}{% endblock %}
+
+{% block header %}
+  {% if banner_is_title %}<h1>{% else %}<p>{% endif %}
+  <a href="{% url 'weblog:index' %}">{% translate "News &amp; Events" %}</a>
+  {% if banner_is_title %}</h1>{% else %}</p>{% endif %}
+{% endblock header %}
+
+{% block head_extra %}
+  <link rel="alternate" type="application/rss+xml" title="RSS" href="{% url 'weblog-feed' %}" />
+{% endblock head_extra %}
+
+{% block body_class %}blog{% endblock %}
+
+{% block content-related %}
+  <div role="complementary">
+    <h2 class="visuallyhidden" id="aside-header">{% translate "Additional Information" %}</h2>
+    {% donation_snippet %}
+
+    {% if events %}
+      <h3>{% translate "Upcoming Events" %}</h3>
+      <ul class="list-events">
+        {% for event in events %}
+          <li>
+            <a href="{{ event.external_url }}" target="_blank">{{ event.headline }}</a>
+            <span class="meta"><span>{{ event.date|date:"DATE_FORMAT" }}</span>  |  {{ event.location }}</span>
+            <i class="icon icon-calendar"></i>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    <p><a href="{% host_url 'homepage' host 'www' %}foundation/conferences/">{% translate "Want your event listed here?" %}</a></p>
+
+    {% top_corporate_members "sponsored_fellow" "diamond" "platinum" header="Sponsored Fellow, Diamond and Platinum Members" %}
+
+    {% comment %}
+    {# tags not implemented in backend yet #}
+    <h3><span>Tags</span></h3>
+    <ul class="list-tags">
+      <li><a href="#">Django Software Foundation</a></li>
+      <li><a href="#">Events</a></li>
+      <li><a href="#">Conferences</a></li>
+      <li><a href="#">Release Announcements</a></li>
+      <li><a href="#">Security</a></li>
+    </ul>
+    {% endcomment %}
+
+    <h3><span>{% translate "Archives" %}</span></h3>
+    {% render_month_links %}
+
+    <h3><span>{% translate "RSS Feeds" %}</span></h3>
+    <ul class="list-links-small rss-list">
+      <li><a href="{% url 'weblog-feed' %}">{% translate "Latest news entries" %}</a></li>
+      <li><a href="https://code.djangoproject.com/timeline?daysback=90&max=50&wiki=on&ticket=on&changeset=on&milestone=on&format=rss">{% translate "Recent code changes" %}</a></li>
+    </ul>
+  </div>
+{% endblock content-related %}
