@@ -1,6 +1,8 @@
 djangoproject.com source code
 =============================
 
+Quick temp change to create some dummy commits.
+
 .. image:: https://github.com/django/djangoproject.com/workflows/Tests/badge.svg?branch=main
     :target: https://github.com/django/djangoproject.com/actions
 
