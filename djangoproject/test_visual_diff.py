@@ -1,6 +1,7 @@
 import io
 import os
 import re
+from pathlib import Path
 from unittest import skipUnless
 
 from django.conf import settings
@@ -15,7 +16,30 @@ from docs.models import DocumentRelease, Release
 
 from .settings.dev import HOST_SCHEME, PARENT_HOST
 
+working_dir = (
+    Path(__file__).parent.joinpath(os.environ["SCREENSHOT_DIR"])
+    if "SCREENSHOT_DIR" in os.environ
+    else Path(__file__).parent.joinpath("tests", "screenshots")
+)
 
+themes = (
+    [s.strip() for s in os.environ["SCREENSHOT_THEMES"].split(",")]
+    if "SCREENSHOT_THEMES" in os.environ
+    else ["dark", "light"]
+)
+
+widths = (
+    [int(x) for x in os.environ["SCREENSHOT_WIDTHS"].split(",")]
+    if "SCREENSHOT_WIDTHS" in os.environ
+    else [
+        414,
+        768,
+        1366,
+    ]  # https://www.browserstack.com/guide/common-screen-resolutions
+)
+
+
+# TODO copied from tests.py. Factor out or remove.
 class ReleaseMixin:
     @classmethod
     def setUpTestData(cls):
@@ -35,11 +59,15 @@ class GenerateScreenshotMixin:
         screen_name = f"{subdomain} {re.sub(r'/', ' ', path).strip()}"
         screen_name = re.sub(r"\s", "_", screen_name)
 
-        baseline_path = self._screenshot_path(screen_name, variant, "baseline.png")
-        current_path = self._screenshot_path(screen_name, variant, "current.png")
-        diff_path = self._screenshot_path(screen_name, variant, "diff.png")
+        # Keep two baselines - one we keep frozen on disk to compare with, and
+        # another to show to the user which we may modify to match image
+        # dimensions.
+        frozen_baseline_path = self._frozen_path(screen_name, variant, "baseline.png")
+        baseline_path = self._path(screen_name, variant, "baseline.png")
+        current_path = self._path(screen_name, variant, "current.png")
+        diff_path = self._path(screen_name, variant, "diff.png")
 
-        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        frozen_baseline_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Clean up first to avoid signalling any ambiguous test results.
         if current_path.exists():
@@ -48,22 +76,22 @@ class GenerateScreenshotMixin:
             os.remove(diff_path)
 
         page.goto(self.live_server_url + path)
+        page.wait_for_timeout(500)
         screenshot_bytes = page.screenshot(full_page=True)
 
         if os.environ["SCREENSHOT_MODE"] == "baseline":
             baseline = Image.open(io.BytesIO(screenshot_bytes))
-            baseline.save(baseline_path)
-            return
-        elif not baseline_path.exists():
-            print(
-                f"Skipped {'/'.join([screen_name, *variant])}, baseline screenshot does not exist"
+            baseline.save(frozen_baseline_path)
+            return (None, None)
+        elif not frozen_baseline_path.exists():
+            return (
+                None,
+                f"Skipped {'/'.join([screen_name, *variant])}, baseline screenshot does not exist",
             )
-            return
 
         current = Image.open(io.BytesIO(screenshot_bytes))
-        current.save(current_path)
 
-        baseline = Image.open(baseline_path)
+        baseline = Image.open(frozen_baseline_path)
         if baseline.size != current.size:
             # Resize both to the largest of both dimensions to enable
             # comparison.
@@ -78,32 +106,26 @@ class GenerateScreenshotMixin:
                 canvas.paste(current, (0, 0))
                 current = canvas
 
-            # self.fail(f"Screenshot {screen_name!r} dimensions differ from expected")
-
         diff = Image.new("RGBA", baseline.size)
         diff_ratio = pixelmatch(current, baseline, diff)
         if diff_ratio > 0:
+            baseline_path.parent.mkdir(parents=True, exist_ok=True)
+            baseline.save(baseline_path)
+            current.save(current_path)
             diff.save(diff_path)
-            print(f"Differences in {'/'.join([screen_name, *variant])}")
+            return (f"Differences in {'/'.join([screen_name, *variant])}", None)
 
-        # if diff_ratio > threshold:
-        #     self.fail(f"Screenshot {screen_name!r} differs by {diff_ratio:.2%} (threshold {threshold:.2%})")
+        return (None, None)
 
-    def _screenshot_path(self, screen_name, variant, name):
-        from pathlib import Path
+    def _frozen_path(self, screen_name, variant, name):
+        return Path().joinpath(working_dir, "baseline", screen_name, *variant, name)
 
-        if os.environ["SCREENSHOT_DIR"]:
-            return Path(__file__).parent.joinpath(
-                os.environ["SCREENSHOT_DIR"], screen_name, *variant, name
-            )
-        else:
-            return Path(__file__).parent.joinpath(
-                "tests", "screenshots", screen_name, *variant, name
-            )
+    def _path(self, screen_name, variant, name):
+        return Path().joinpath(working_dir, screen_name, *variant, name)
 
 
 @skipUnless(
-    os.environ.get("SCREENSHOT_MODE"),
+    "SCREENSHOT_MODE" in os.environ,
     "Set SCREENSHOT_MODE=baseline or compare to generate before and after screenshots.",
 )
 class ScreenshotTests(ReleaseMixin, GenerateScreenshotMixin, StaticLiveServerTestCase):
@@ -128,13 +150,20 @@ class ScreenshotTests(ReleaseMixin, GenerateScreenshotMixin, StaticLiveServerTes
         self.setUpTestData()
 
     def test_screenshots(self):
-        for sitemap in sitemaps.values():
-            for location in [url.get("location") for url in sitemap().get_urls()][:2]:
-                # https://www.browserstack.com/guide/common-screen-resolutions
-                # 414, 768, 1366
-                widths = [414, 768, 1366]
-                themes = ["dark", "light"]
+        diffs = []
+        skipped = []
 
+        diff_list_path = Path.joinpath(working_dir, "diffs.txt")
+        skipped_list_path = Path.joinpath(working_dir, "skipped.txt")
+
+        # Clean up first to avoid signalling any ambiguous test results.
+        if diff_list_path.exists():
+            os.remove(diff_list_path)
+        if skipped_list_path.exists():
+            os.remove(skipped_list_path)
+
+        for sitemap in sitemaps.values():
+            for location in [url.get("location") for url in sitemap().get_urls()]:
                 page = self.browser.new_page(user_agent=self.mac_user_agent)
                 self.browser.browser_type.name
                 for theme in themes:
@@ -150,6 +179,20 @@ class ScreenshotTests(ReleaseMixin, GenerateScreenshotMixin, StaticLiveServerTes
                     )
                     for width in widths:
                         page.set_viewport_size({"width": width, "height": 800})
-                        variant = [self.browser.browser_type.name, str(width), theme]
+                        variant = [self.browser.browser_type.name, theme, str(width)]
 
-                        self.generateScreenshot(location, page, variant)
+                        (diff, skip) = self.generateScreenshot(location, page, variant)
+                        if diff:
+                            diffs.append(diff)
+                        if skip:
+                            skipped.append(skip)
+
+        if len(diffs) > 0:
+            with open(diff_list_path, "w") as f:
+                f.write("\n".join(diffs))
+                f.write("\n")
+
+        if len(skipped) > 0:
+            with open(skipped_list_path, "w") as f:
+                f.write("\n".join(skipped))
+                f.write("\n")
