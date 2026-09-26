@@ -4,15 +4,13 @@ import re
 from pathlib import Path
 from unittest import skipUnless
 
-from django.conf import settings
 from django.contrib.staticfiles.testing import StaticLiveServerTestCase
 from PIL import Image
 from pixelmatch.contrib.PIL import pixelmatch
 from playwright.sync_api import sync_playwright
 
-from djangoproject.test_runner import selected_browsers
+from djangoproject.tests import ReleaseMixin
 from djangoproject.urls.www import sitemaps
-from docs.models import DocumentRelease, Release
 
 from .settings.dev import HOST_SCHEME, PARENT_HOST
 
@@ -39,23 +37,12 @@ widths = (
 )
 
 
-# TODO copied from tests.py. Factor out or remove.
-class ReleaseMixin:
-    @classmethod
-    def setUpTestData(cls):
-        r2, _ = Release.objects.get_or_create(version="2.0")
-        DocumentRelease.objects.get_or_create(
-            is_default=True,
-            defaults={"lang": settings.DEFAULT_LANGUAGE_CODE, "release": r2},
-        )
-
-
 class GenerateScreenshotMixin:
     def generateScreenshot(self, location, page, variant, *, threshold=0.1):
         # Derive a friendly test name from the URL
         tokens = [f"{HOST_SCHEME}://", f".{PARENT_HOST}"]
         pattern = "|".join(map(re.escape, tokens))
-        (*_, subdomain, path) = re.split(pattern, location)
+        *_, subdomain, path = re.split(pattern, location)
         screen_name = f"{subdomain} {re.sub(r'/', ' ', path).strip()}"
         screen_name = re.sub(r"\s", "_", screen_name)
 
@@ -75,7 +62,7 @@ class GenerateScreenshotMixin:
         if diff_path.exists():
             os.remove(diff_path)
 
-        page.goto(self.live_server_url + path)
+        page.goto(location)
         page.wait_for_timeout(500)
         screenshot_bytes = page.screenshot(full_page=True)
 
@@ -86,7 +73,8 @@ class GenerateScreenshotMixin:
         elif not frozen_baseline_path.exists():
             return (
                 None,
-                f"Skipped {'/'.join([screen_name, *variant])}, baseline screenshot does not exist",
+                f"Skipped {'/'.join([screen_name, *variant])}, baseline "
+                "screenshot does not exist",
             )
 
         current = Image.open(io.BytesIO(screenshot_bytes))
@@ -129,6 +117,9 @@ class GenerateScreenshotMixin:
     "Set SCREENSHOT_MODE=baseline or compare to generate before and after screenshots.",
 )
 class ScreenshotTests(ReleaseMixin, GenerateScreenshotMixin, StaticLiveServerTestCase):
+    fixtures = ["doc_releases", "dashboard_test_data"]
+    port = 8000
+
     @classmethod
     def setUpClass(cls):
         os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
@@ -181,7 +172,7 @@ class ScreenshotTests(ReleaseMixin, GenerateScreenshotMixin, StaticLiveServerTes
                         page.set_viewport_size({"width": width, "height": 800})
                         variant = [self.browser.browser_type.name, theme, str(width)]
 
-                        (diff, skip) = self.generateScreenshot(location, page, variant)
+                        diff, skip = self.generateScreenshot(location, page, variant)
                         if diff:
                             diffs.append(diff)
                         if skip:
